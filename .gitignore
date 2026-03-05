@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.env
+.venv/
+venv/
+aidos_report_*.html
+aidos_trace_*.jsonl
+.idea/
+.vscode/
+*.swp
+*.swo
