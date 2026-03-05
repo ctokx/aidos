@@ -8,8 +8,8 @@
     ██║  ██║██║██████╔╝╚██████╔╝███████║
     ╚═╝  ╚═╝╚═╝╚═════╝  ╚═════╝ ╚══════╝
   </pre>
-  <strong>The AI that thinks like an attacker.</strong><br>
-  <sub>Autonomous LLM agent that chains real offensive tools to find DoS vulnerabilities — so you don't pay $5k for a pentest.</sub>
+  <strong>AI-assisted resilience testing for web infrastructure.</strong><br>
+  <sub>Autonomous LLM agent that orchestrates open-source tooling to evaluate service availability and reliability.</sub>
 </p>
 
 <p align="center">
@@ -25,17 +25,17 @@
 
 ## LEGAL DISCLAIMER
 
-> **THIS PROJECT CONTAINS OFFENSIVE SECURITY CAPABILITIES.**
+> **VISIBLE NOTICE**
 >
-> Execution can materially affect service availability, network stability, and third-party infrastructure behavior.
-> Use may be subject to computer misuse law, telecom policy, contract terms, and local regulation.
-> Operators and organizations assume full responsibility and liability for all use, outcomes, and legal compliance.
+> AIDOS is intended for defensive reliability and resilience testing.
+> Run assessments only within your approved scope and environment.
+> Stress tests can affect uptime and network performance.
 
 ## Why
 
-You can't afford to be complacent about DoS resilience. Real attackers don't use one tool — they probe, analyze, adapt, and layer attacks across multiple protocols. Testing against that costs $5,000+ from a pentest firm, or requires deep expertise to do yourself.
+DoS and availability failures are hard to evaluate with single-point tools. Real-world behavior is multi-step and adaptive. Traditional assessment can be expensive or time-consuming to run manually.
 
-AIDOS replaces the human pentester's brain with an LLM. It uses **Gemini** as its reasoning engine and **every major open-source offensive tool** as its hands. Point it at your target. It does the rest.
+AIDOS uses **Gemini** as its reasoning engine and open-source security tooling for automated, structured resilience assessment.
 
 It doesn't blindly flood. It **thinks**:
 
@@ -45,7 +45,7 @@ That's the kind of assessment a senior pentester does. Now an LLM does it autono
 
 ## Arsenal
 
-AIDOS orchestrates every tool it can find on your system. The more you install, the more dangerous it gets.
+AIDOS orchestrates the tools available on your system. The more tools installed, the broader the assessment coverage.
 
 | Category | Tools | What They Do |
 |----------|-------|-------------|
@@ -57,7 +57,7 @@ AIDOS orchestrates every tool it can find on your system. The more you install, 
 | **Crypto** | `sslyze` | TLS misconfiguration, weak ciphers, renegotiation vulnerabilities |
 | **Custom** | `run_custom_command` | Any CLI tool the agent decides to use. Scapy, curl, whatever it needs |
 
-No tool installed? AIDOS adapts. It always has built-in HTTP flooding, slowloris, and slow POST. But install the full arsenal and it becomes genuinely dangerous.
+No tool installed? AIDOS adapts. It includes built-in HTTP flood, slowloris, and slow POST testing.
 
 ### Minimum (works out of the box)
 ```
@@ -65,7 +65,7 @@ pip install -e .
 ```
 Built-in: HTTP flood, slowloris, slow POST, crawling, fingerprinting, benchmarking.
 
-### Recommended (real damage)
+### Recommended (extended coverage)
 ```bash
 # Debian/Ubuntu
 apt install nmap masscan hping3 nikto slowhttptest
@@ -190,7 +190,7 @@ The agent doesn't follow a fixed script. It **reasons about results**:
 |------|-------------|-------------------|
 | **wrk/bombardier/vegeta** | Floods one URL you specify | Doesn't know WHICH URL to flood |
 | **slowhttptest** | Runs one slow attack | Doesn't combine with other vectors |
-| **nmap/nuclei** | Finds vulnerabilities | Doesn't exploit them for DoS |
+| **nmap/nuclei** | Finds vulnerabilities | Doesn't provide full resilience workflow by itself |
 | **JMeter/k6/Locust** | Runs scripts you write | You have to write the scripts |
 | **LOIC/HOIC** | Brute force flood | Zero intelligence, easily blocked |
 | **AIDOS** | **All of the above, autonomously** | — |
@@ -235,4 +235,4 @@ MIT — Use it to protect your systems.
 
 ## Disclaimer
 
-AIDOS is an offensive security and stress-testing framework. Execution can disrupt availability and trigger upstream abuse controls, provider mitigations, or legal escalation. Operation is governed by applicable law, contractual scope, and organizational policy in the relevant jurisdiction. The operator and deploying organization retain full responsibility and liability for all activity and consequences.
+AIDOS is a defensive security and stress-testing framework for resilience validation. Use within approved scope and according to your organization’s policy and local regulations.
