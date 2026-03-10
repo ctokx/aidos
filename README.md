@@ -26,6 +26,7 @@
 ## LEGAL DISCLAIMER
 
 > **VISIBLE NOTICE**
+> **READ THAT**
 >
 > AIDOS is intended for defensive reliability and resilience testing.
 > Run assessments only within your approved scope and environment.
