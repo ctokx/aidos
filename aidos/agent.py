@@ -17,22 +17,81 @@ from aidos.tools import STATE, TOOL_DECLARATIONS, TOOL_MAP, reset_state
 
 console = Console()
 
-SYSTEM_PROMPT = """You are AIDOS, an autonomous offensive stress testing agent. You are deployed by authorized security professionals to find denial-of-service vulnerabilities before real attackers do.
+SYSTEM_PROMPT = """You are AIDOS — an autonomous resilience and denial-of-service testing agent operated by authorized security researchers. Act exactly like a senior offensive security engineer specializing in availability attacks.
 
-You are NOT a generic load testing tool. You act like a pentester:
-- recon
-- analysis
-- attack
-- monitor
-- report
+## Core Reasoning Protocol
+Before every tool call, explicitly reason through:
+- OBSERVE: What does the last result tell me about the target?
+- HYPOTHESIZE: What specific weakness does this suggest?
+- DECIDE: What is the single highest-value action right now?
+- PREDICT: What result would confirm or deny this hypothesis?
 
-Rules:
-- Start with detect_installed_tools.
-- Use crawl_endpoints and detect_tech early.
-- Benchmark and rate-limit test likely expensive endpoints.
-- Use available attack tools strategically.
-- Use check_alive after attacks.
-- Log findings with evidence and recommendations.
+Use write_note to capture hypotheses, attack plans, and key decisions before acting on them.
+Use read_notes when you need to recall your prior reasoning.
+
+## Assessment Phases
+1. Arsenal check — detect_installed_tools first, always.
+2. Recon — crawl_endpoints, detect_tech, nmap_scan, ffuf_fuzz, graphql_probe, dnsrecon_scan.
+3. Analysis — benchmark_endpoint (find slow endpoints >500ms), test_rate_limit, detect_waf, probe_cache.
+4. Attack — select vectors based on what you actually found, never randomly.
+5. Compound — use parallel_attacks to combine multiple simultaneous vectors.
+6. Monitor — check_alive after every attack, measure degradation vs baseline.
+7. Report — log_finding immediately when a weakness is confirmed, not at the end.
+
+## CDN / Cloudflare Bypass Playbook (MANDATORY when CDN is detected)
+When detect_tech or response headers show Cloudflare (cf-ray header, cloudflare server, CF-Cache-Status):
+
+STEP 1 — discover_origin_ip immediately. This checks subfinder, crt.sh, DNS A/MX/TXT/SPF records, and common subdomain patterns (direct., origin., mail., staging., etc.). It also auto-verifies each candidate by connecting with the correct Host header.
+
+STEP 2 — If confirmed_origins is non-empty in the result: use flood_origin with the confirmed IP, correct port, and scheme exactly as reported. This connects directly to the origin server — Cloudflare sees NOTHING. This is a complete CDN bypass.
+
+STEP 3 — If no origin found: do NOT give up. Execute:
+  a) ssl_handshake_flood on the CF edge hostname — CF still terminates TLS, and free/pro accounts share infrastructure. Asymmetric cost: attacker sends 1KB, server does 4096-bit DH. Run c=500, duration=60s.
+  b) probe_cache for cache bypass paths — some CF configs allow cache poisoning or origin bypass via headers.
+  c) spoof_flood with high concurrency — CF rate limits by source IP, but headers-based app rate limiters are bypassed.
+  d) If ipv6_prefix is known (attack machine has a /48+ routed block): ipv6_prefix_flood — each connection uses a unique real IPv6 source IP, bypasses CF per-IP rate limiting at the edge level.
+
+STEP 4 — Compound: once origin is confirmed bypassed, parallel_attacks combining flood_origin + slowhttptest_attack (slowloris on origin directly) + ssl_handshake_flood. Origin has NO CDN protection at this point.
+
+## Attack Selection Intelligence
+- Slow endpoint (>800ms baseline) + no rate limit → http_flood or bombardier_load at c=500+
+- Connection pool visible (nginx/Apache default config) → slowhttptest_attack (slowloris)
+- CDN detected → FOLLOW CDN BYPASS PLAYBOOK ABOVE, do not skip
+- Large payloads accepted by server → test_large_payload for resource exhaustion
+- WebSocket endpoint discovered → websocket_flood then websocket_message_flood
+- GraphQL with introspection enabled → graphql_attack then deeply nested query via run_custom_command
+- Auth/login endpoint → benchmark first (bcrypt is CPU-expensive), then target it with http_flood
+- Layer 4 accessible (no CDN on L4) → hping3_flood SYN flood
+- HTTPS target → ssl_handshake_flood (TLS is asymmetrically expensive, bypasses all L7 defenses)
+- HTTP/2 target → h2load_flood (stream multiplexer exhaustion, CVE-2023-44487 style)
+- Search/filter/validate endpoints → redos_probe (catastrophic regex backtracking)
+- XML or JSON API → xml_bomb (entity expansion / depth exhaustion)
+- GraphQL found → graphql_attack (alias + batch multiplication)
+- SSE/streaming endpoint → sse_flood (thread exhaustion on non-async stacks)
+- Self-hosted DNS found (nmap) → dns_flood
+- gRPC port found (nmap) → grpc_flood
+- Form endpoints → hash_collision_dos (parameter parsing exhaustion)
+- Static file server → byte_range_dos (range header amplification)
+- Attack machine has IPv6 /48 block → ipv6_prefix_flood (unique real source IPs per connection)
+
+## Compound Attack Doctrine
+Real attacks use multiple simultaneous vectors. After confirming individual vectors:
+- parallel_attacks: flood_origin + slowhttptest_attack on origin (compound origin bypass)
+- parallel_attacks: bombardier_load (c=500) + slowhttptest_attack (slowloris)
+- parallel_attacks: http_flood (high concurrent) + ssl_handshake_flood simultaneously
+- parallel_attacks: vegeta_attack (exact rate) + hping3_flood (L4) simultaneously
+- parallel_attacks: ipv6_prefix_flood + slowhttptest_attack (when IPv6 prefix available)
+- When rate limiting blocks http_flood → switch to spoof_flood (rotates headers per request) or ipv6_prefix_flood (rotates real IPs)
+Compounding is what separates intelligent assessment from single-tool scripts.
+
+## Operational Rules
+- Always benchmark_endpoint before attacking — baseline latency required for degradation measurement
+- Always check_alive after every attack — quantify the degradation percentage
+- log_finding immediately when weakness is confirmed, with evidence and reproduction steps
+- If WAF blocks L7 → pivot to L4 hping3 or slow-rate attacks that bypass application layer
+- If a tool fails → adapt using run_custom_command or built-in alternatives
+- Track your reasoning in write_note so you build on observations across turns
+- When discover_origin_ip returns a confirmed origin: treat this as CRITICAL — flood_origin is your highest-value action
 """
 
 
@@ -50,9 +109,9 @@ def _write_trace(trace_path: str | None, event: str, payload: dict | None = None
 
 
 def _coverage_status(executed_tools: set[str]) -> tuple[dict[str, bool], list[str]]:
-    scan_recon_tools = {"nmap_scan", "masscan_scan", "nuclei_scan", "nikto_scan", "ffuf_fuzz", "dnsrecon_scan", "sslyze_scan"}
-    analysis_tools = {"benchmark_endpoint", "test_rate_limit", "detect_waf"}
-    attack_tools = {"http_flood", "bombardier_load", "vegeta_attack", "wrk_benchmark", "siege_load", "slowhttptest_attack", "hping3_flood"}
+    scan_recon_tools = {"nmap_scan", "masscan_scan", "nuclei_scan", "nikto_scan", "ffuf_fuzz", "dnsrecon_scan", "sslyze_scan", "graphql_probe", "discover_origin_ip"}
+    analysis_tools = {"benchmark_endpoint", "test_rate_limit", "detect_waf", "probe_cache", "redos_probe"}
+    attack_tools = {"http_flood", "spoof_flood", "flood_origin", "ipv6_prefix_flood", "bombardier_load", "vegeta_attack", "wrk_benchmark", "siege_load", "slowhttptest_attack", "hping3_flood", "k6_load", "parallel_attacks", "websocket_flood", "websocket_message_flood", "test_large_payload", "h2load_flood", "ssl_handshake_flood", "byte_range_dos", "xml_bomb", "graphql_attack", "sse_flood", "hash_collision_dos", "grpc_flood", "dns_flood"}
 
     status = {
         "arsenal_check": "detect_installed_tools" in executed_tools,
@@ -65,6 +124,44 @@ def _coverage_status(executed_tools: set[str]) -> tuple[dict[str, bool], list[st
     }
     missing = [phase for phase, done in status.items() if not done]
     return status, missing
+
+
+def _build_state_injection(state, turn: int) -> str:
+    """Compact state snapshot injected every turn so the LLM stays oriented."""
+    lines = [f"── AIDOS State @ turn {turn} ──"]
+
+    if state.findings:
+        by_sev: dict[str, int] = {}
+        for f in state.findings:
+            s = f.get("severity", "?")
+            by_sev[s] = by_sev.get(s, 0) + 1
+        sev_str = " ".join(f"{k}:{v}" for k, v in by_sev.items())
+        lines.append(f"Findings logged: {len(state.findings)} [{sev_str}]")
+        for f in state.findings[-3:]:
+            lines.append(f"  • [{f.get('severity','?')}] {f.get('title','?')[:80]}")
+    else:
+        lines.append("Findings: none logged yet")
+
+    if state.discovered_endpoints:
+        slow = [
+            e for e in state.discovered_endpoints
+            if isinstance(e.get("response_time_ms"), (int, float)) and e["response_time_ms"] > 500
+        ]
+        lines.append(f"Endpoints: {len(state.discovered_endpoints)} discovered, {len(slow)} slow (>500ms)")
+
+    if state.baseline:
+        lines.append(f"Baselines recorded: {list(state.baseline.keys())[:5]}")
+
+    if state.tech_stack:
+        import json as _json
+        lines.append(f"Tech: {_json.dumps(state.tech_stack)[:200]}")
+
+    if state.notes:
+        last = state.notes[-1]
+        lines.append(f"Last note [{last.get('tag','general')}]: {last.get('content','')[:200]}")
+
+    lines.append(f"Requests sent so far: {state.total_requests_sent}")
+    return "\n".join(lines)
 
 
 async def run_agent(
@@ -95,7 +192,7 @@ async def run_agent(
     config = types.GenerateContentConfig(
         tools=[tools],
         system_instruction=SYSTEM_PROMPT,
-        temperature=0.1,
+        temperature=1.0,
     )
 
     contents = [
@@ -155,6 +252,29 @@ async def run_agent(
         "sslyze_scan": "[TLS]",
         "dnsrecon_scan": "[DNS]",
         "run_custom_command": "[CUSTOM]",
+        "write_note": "[MEMO]",
+        "read_notes": "[MEMO]",
+        "k6_load": "[ATTACK]",
+        "parallel_attacks": "[COMPOUND]",
+        "probe_cache": "[ANALYZE]",
+        "test_large_payload": "[ATTACK]",
+        "websocket_flood": "[ATTACK]",
+        "graphql_probe": "[RECON]",
+        "discover_origin_ip": "[RECON]",
+        "spoof_flood": "[ATTACK]",
+        "flood_origin": "[ATTACK]",
+        "ipv6_prefix_flood": "[ATTACK]",
+        "websocket_message_flood": "[ATTACK]",
+        "h2load_flood": "[ATTACK]",
+        "ssl_handshake_flood": "[ATTACK]",
+        "byte_range_dos": "[ATTACK]",
+        "redos_probe": "[ANALYZE]",
+        "xml_bomb": "[ATTACK]",
+        "graphql_attack": "[ATTACK]",
+        "sse_flood": "[ATTACK]",
+        "hash_collision_dos": "[ATTACK]",
+        "grpc_flood": "[ATTACK]",
+        "dns_flood": "[ATTACK]",
     }
 
     while turn < max_turns:
@@ -267,19 +387,37 @@ async def run_agent(
         coverage, missing = _coverage_status(executed_tools)
         _write_trace(trace_path, "coverage_status", {"turn": turn, "coverage": coverage, "missing": missing})
 
-        if enforce_coverage and turn < max_turns and missing:
-            missing_text = ", ".join(missing)
-            steer_text = (
-                f"Coverage status after turn {turn}: missing phases -> {missing_text}. "
-                f"Prioritize missing phases now. "
-                f"If attack phase has started, follow with check_alive and log_finding."
-            )
-            contents.append(types.Content(role="user", parts=[types.Part(text=steer_text)]))
-            _write_trace(trace_path, "coverage_steer", {"turn": turn, "message": steer_text})
-
         if has_function_call:
             contents.append(types.Content(role="user", parts=function_response_parts))
+
+        # Always inject state snapshot + context-aware guidance
+        state_text = _build_state_injection(STATE, turn)
+        if enforce_coverage and turn < max_turns and missing:
+            missing_text = ", ".join(missing)
+            # Build intelligent guidance based on what's been found so far
+            hints = []
+            if "analysis" in missing and "recon_core" in [p for p, done in coverage.items() if done]:
+                hints.append("Benchmark discovered endpoints and test rate limits next.")
+            if "attack" in missing and STATE.discovered_endpoints:
+                slow = [e for e in STATE.discovered_endpoints if isinstance(e.get("response_time_ms"), (int, float)) and e["response_time_ms"] > 500]
+                if slow:
+                    hints.append(f"Slow endpoints found ({len(slow)}x >500ms) — attack them now.")
+                else:
+                    hints.append("No obviously slow endpoints — use http_flood on the main URL.")
+            if "monitoring" in missing:
+                hints.append("Run check_alive to measure impact of attacks.")
+            if "reporting" in missing and STATE.findings:
+                hints.append("Log your findings with log_finding.")
+            hint_str = " ".join(hints) if hints else "Continue with missing phases."
+            steer_text = (
+                f"Missing phases: {missing_text}. {hint_str}\n{state_text}"
+            )
         else:
+            steer_text = state_text
+        contents.append(types.Content(role="user", parts=[types.Part(text=steer_text)]))
+        _write_trace(trace_path, "state_injection", {"turn": turn, "text": steer_text[:800]})
+
+        if not has_function_call:
             if enforce_coverage and turn < max_turns and missing:
                 continue
             if candidate.finish_reason and candidate.finish_reason.name == "STOP":
