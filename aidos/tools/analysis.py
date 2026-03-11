@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import statistics
 import time
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -284,5 +285,62 @@ async def redos_probe(url: str, param: str = "q", extra_params: dict | None = No
         "recommendation": (
             f"{len(suspicious)} payloads caused >3x slowdown — ReDoS likely"
             if suspicious else "No obvious ReDoS detected"
+        ),
+    }
+
+
+async def find_amplification_ratio(url: str) -> dict:
+    endpoints = STATE.discovered_endpoints or []
+    urls_to_check = list({ep.get("url", "") for ep in endpoints if ep.get("url")})[:40]
+    if not urls_to_check:
+        urls_to_check = [url]
+
+    parsed = urlparse(url)
+    base_request_size = len(f"GET / HTTP/1.1\r\nHost: {parsed.netloc}\r\nAccept-Encoding: gzip\r\n\r\n".encode())
+
+    results = []
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0, limit_per_host=0)) as session:
+        for ep_url in urls_to_check:
+            try:
+                start = time.monotonic()
+                async with session.get(
+                    ep_url, ssl=False,
+                    headers={"Accept-Encoding": "gzip, deflate"},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                    allow_redirects=True,
+                ) as r:
+                    body = await r.read()
+                    elapsed = (time.monotonic() - start) * 1000
+                    resp_size = len(body)
+                    content_enc = r.headers.get("Content-Encoding", "")
+                    transfer_enc = r.headers.get("Transfer-Encoding", "")
+                    ratio = resp_size / max(base_request_size, 1)
+                    STATE.total_requests_sent += 1
+                    results.append({
+                        "url": ep_url,
+                        "response_bytes": resp_size,
+                        "amplification_ratio": round(ratio, 1),
+                        "response_ms": round(elapsed, 2),
+                        "status": r.status,
+                        "content_encoding": content_enc,
+                        "transfer_encoding": transfer_enc,
+                        "dynamically_compressed": bool(content_enc and "gzip" in content_enc.lower()),
+                    })
+            except Exception:
+                continue
+
+    results.sort(key=lambda x: x.get("amplification_ratio", 0), reverse=True)
+    top = [r for r in results if r.get("amplification_ratio", 0) > 10][:10]
+    best = results[0] if results else None
+
+    return {
+        "endpoints_checked": len(results),
+        "high_amplification_targets": top,
+        "best_target": best,
+        "recommendation": (
+            f"Best flood target: {best['url']} — {best['amplification_ratio']}x ratio "
+            f"({best['response_bytes']} byte response). "
+            + ("Server dynamically compresses — CPU cost per request is high." if best.get("dynamically_compressed") else "")
+            if best else "No endpoints analyzed"
         ),
     }

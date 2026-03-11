@@ -5,16 +5,17 @@ from .recon import (
     nmap_scan, masscan_scan, nuclei_scan, nikto_scan, ffuf_fuzz,
     sslyze_scan, dnsrecon_scan, graphql_probe, discover_origin_ip,
 )
-from .analysis import http_request, benchmark_endpoint, test_rate_limit, detect_waf, probe_cache, redos_probe
+from .analysis import http_request, benchmark_endpoint, test_rate_limit, detect_waf, probe_cache, redos_probe, find_amplification_ratio
 from .flood_l7 import (
     http_flood, spoof_flood, flood_origin, ipv6_prefix_flood,
+    http2_rapid_reset, http2_continuation_flood,
     bombardier_load, vegeta_attack, wrk_benchmark, siege_load, k6_load, h2load_flood,
 )
 from .flood_l4 import hping3_flood, ssl_handshake_flood, grpc_flood, dns_flood
 from .slow import slowhttptest_attack, sse_flood
 from .app import (
     websocket_flood, websocket_message_flood, graphql_attack,
-    xml_bomb, byte_range_dos, hash_collision_dos, test_large_payload,
+    xml_bomb, byte_range_dos, hash_collision_dos, test_large_payload, gzip_bomb_upload,
 )
 from .meta import write_note, read_notes, log_finding, check_alive, run_custom_command, parallel_attacks
 
@@ -354,6 +355,34 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "http2_continuation_flood",
+        "description": "HTTP/2 CONTINUATION flood. Sends HEADERS frame without END_HEADERS flag, then sends unbounded CONTINUATION frames. Server holds stream open in header-receiving state indefinitely — cannot process or close it until END_HEADERS arrives. Different mechanism from rapid reset: connection is not freed, resources are held.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string"},
+                "port": {"type": "integer"},
+                "connections": {"type": "integer"},
+                "duration_seconds": {"type": "integer"},
+            },
+            "required": ["host"],
+        },
+    },
+    {
+        "name": "http2_rapid_reset",
+        "description": "CVE-2023-44487 HTTP/2 Rapid Reset — built-in, no external tools required. Opens N persistent HTTP/2 connections and sends HEADERS+RST_STREAM pairs as fast as possible. Forces server to continuously allocate and free stream state. Most effective against servers with HTTP/2 enabled and no rapid reset mitigation.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string"},
+                "port": {"type": "integer"},
+                "connections": {"type": "integer"},
+                "duration_seconds": {"type": "integer"},
+            },
+            "required": ["host"],
+        },
+    },
+    {
         "name": "h2load_flood",
         "description": "HTTP/2 multiplexed stream flood. Opens N connections each with M concurrent streams. CVE-2023-44487 style. h2load primary, bombardier --http2 fallback.",
         "parameters": {
@@ -529,6 +558,19 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "gzip_bomb_upload",
+        "description": "Upload a gzip-compressed payload that decompresses to a much larger size on the server (e.g., 50KB compressed → 50MB decompressed). If the server decompresses Content-Encoding: gzip bodies without size limits, each request exhausts memory/CPU proportional to the uncompressed size.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "method": {"type": "string", "enum": ["POST", "PUT", "PATCH"]},
+                "uncompressed_mb": {"type": "integer", "description": "Target size in MB after decompression"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
         "name": "test_large_payload",
         "description": "Resource exhaustion via large request bodies. Finds server upload/processing limits.",
         "parameters": {
@@ -550,6 +592,15 @@ TOOL_DECLARATIONS = [
                 "url": {"type": "string"},
                 "param": {"type": "string"},
             },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "find_amplification_ratio",
+        "description": "Scans all discovered endpoints for request-to-response size ratio. Identifies the most efficient flood targets — a 100-byte request returning 500KB is 5000x more effective to flood than one returning 200 bytes. Run this after crawl_endpoints to find the best attack target before flooding.",
+        "parameters": {
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
             "required": ["url"],
         },
     },
@@ -649,10 +700,13 @@ TOOL_MAP: dict = {
     "detect_waf": detect_waf,
     "probe_cache": probe_cache,
     "redos_probe": redos_probe,
+    "find_amplification_ratio": find_amplification_ratio,
     "http_flood": http_flood,
     "spoof_flood": spoof_flood,
     "flood_origin": flood_origin,
     "ipv6_prefix_flood": ipv6_prefix_flood,
+    "http2_rapid_reset": http2_rapid_reset,
+    "http2_continuation_flood": http2_continuation_flood,
     "bombardier_load": bombardier_load,
     "vegeta_attack": vegeta_attack,
     "wrk_benchmark": wrk_benchmark,
@@ -672,6 +726,7 @@ TOOL_MAP: dict = {
     "byte_range_dos": byte_range_dos,
     "hash_collision_dos": hash_collision_dos,
     "test_large_payload": test_large_payload,
+    "gzip_bomb_upload": gzip_bomb_upload,
     "check_alive": check_alive,
     "log_finding": log_finding,
     "run_custom_command": run_custom_command,

